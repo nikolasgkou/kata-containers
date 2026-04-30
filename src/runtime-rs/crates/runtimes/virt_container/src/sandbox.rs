@@ -98,6 +98,7 @@ pub enum SandboxState {
 struct SandboxInner {
     state: SandboxState,
     exit_info: Option<SandboxExitInfo>,
+    created_at: Option<SystemTime>,
 }
 
 impl SandboxInner {
@@ -105,6 +106,7 @@ impl SandboxInner {
         Self {
             state: SandboxState::Init,
             exit_info: None,
+            created_at: None,
         }
     }
 }
@@ -864,6 +866,7 @@ impl Sandbox for VirtSandbox {
             .context("create sandbox")?;
 
         inner.state = SandboxState::Running;
+        inner.created_at = Some(std::time::SystemTime::now());
 
         let sandbox = self.clone();
         tokio::spawn(async move {
@@ -985,7 +988,8 @@ impl Sandbox for VirtSandbox {
             sandbox_id: self.sid.clone(),
             pid: std::process::id(),
             state,
-            ..Default::default()
+            info: std::collections::HashMap::new(),
+            created_at: inner.created_at,
         })
     }
 
