@@ -181,6 +181,20 @@ impl VirtSandbox {
         self.hypervisor.clone()
     }
 
+    async fn record_stop(&self, exit_status: u32, exited_at: SystemTime) {
+        let mut inner = self.inner.write().await;
+        if inner.state == SandboxState::Stopped {
+            return;
+        }
+
+        inner.state = SandboxState::Stopped;
+        inner.exit_info = Some(SandboxExitInfo {
+            exit_status,
+            exited_at: Some(exited_at),
+        });
+        let _ = self.exit_notify_tx.send(true);
+    }
+
     #[instrument]
     async fn prepare_for_start_sandbox(
         &self,
@@ -851,6 +865,21 @@ impl Sandbox for VirtSandbox {
 
         inner.state = SandboxState::Running;
 
+        let sandbox = self.clone();
+        tokio::spawn(async move {
+            match sandbox.hypervisor.wait_vm().await {
+                Ok(exit_code) => {
+                    sandbox
+                        .record_stop(exit_code as u32, SystemTime::now())
+                        .await;
+                }
+                Err(err) => {
+                    warn!(sl!(), "failed waiting for sandbox VM exit: {:?}", err);
+                    sandbox.record_stop(255, SystemTime::now()).await;
+                }
+            }
+        });
+
         // get and store guest details
         self.store_guest_details()
             .await
@@ -962,22 +991,37 @@ impl Sandbox for VirtSandbox {
 
     async fn wait(&self) -> Result<SandboxExitInfo> {
         info!(sl!(), "wait sandbox");
-        let exit_code = self.hypervisor.wait_vm().await.context("wait vm")?;
-        Ok(SandboxExitInfo {
-            exit_status: exit_code as u32,
-            exited_at: Some(std::time::SystemTime::now()),
-        })
+        {
+            let inner = self.inner.read().await;
+            if inner.state == SandboxState::Stopped {
+                return Ok(inner.exit_info.clone().unwrap_or_default());
+            }
+        }
+
+        let mut exit_notify_rx = self.exit_notify_tx.subscribe();
+        while !*exit_notify_rx.borrow() {
+            exit_notify_rx
+                .changed()
+                .await
+                .context("wait for sandbox stop notification")?;
+        }
+
+        let inner = self.inner.read().await;
+        Ok(inner.exit_info.clone().unwrap_or_default())
     }
 
     async fn stop(&self) -> Result<()> {
-        let mut sandbox_inner = self.inner.write().await;
-
-        if sandbox_inner.state != SandboxState::Stopped {
-            info!(sl!(), "begin stop sandbox");
-            self.hypervisor.stop_vm().await.context("stop vm")?;
-            sandbox_inner.state = SandboxState::Stopped;
-            info!(sl!(), "sandbox stopped");
+        {
+            let sandbox_inner = self.inner.read().await;
+            if sandbox_inner.state == SandboxState::Stopped {
+                return Ok(());
+            }
         }
+
+        info!(sl!(), "begin stop sandbox");
+        self.hypervisor.stop_vm().await.context("stop vm")?;
+        self.wait().await.context("wait for vm exit after stop")?;
+        info!(sl!(), "sandbox stopped");
 
         Ok(())
     }
