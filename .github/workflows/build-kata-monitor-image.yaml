@@ -1,0 +1,139 @@
+name: Build kata-monitor multi-arch image (CI / testing)
+
+# Builds the kata-monitor container image for testing purposes.
+#
+# - On `push` to main and on a weekly schedule the image is published to
+#   the kata-containers/kata-monitor-ci repositories tagged with `latest`
+#   and the commit SHA. This mirrors the `kata-deploy-ci` flow and gives
+#   users a reliable image to track main with.
+# - On `pull_request` the image is only built (not pushed) as a smoke
+#   test that touches the Dockerfile or kata-monitor sources keep
+#   building cleanly across all supported architectures.
+# - The same workflow can be triggered manually via `workflow_dispatch`.
+
+on:
+  schedule:
+    # Run every Sunday at 03:00 UTC to keep the testing image current.
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/runtime/cmd/kata-monitor/**'
+      - 'src/runtime/pkg/kata-monitor/**'
+      - 'src/runtime/go.mod'
+      - 'src/runtime/go.sum'
+      - 'tools/packaging/kata-monitor/**'
+      - '.github/workflows/build-kata-monitor-image.yaml'
+  pull_request:
+    paths:
+      - 'src/runtime/cmd/kata-monitor/**'
+      - 'src/runtime/pkg/kata-monitor/**'
+      - 'tools/packaging/kata-monitor/**'
+      - '.github/workflows/build-kata-monitor-image.yaml'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-kata-monitor-ci-image
+  cancel-in-progress: true
+
+env:
+  REGISTRIES: "quay.io/kata-containers/kata-monitor-ci ghcr.io/kata-containers/kata-monitor-ci"
+  PLATFORMS: "linux/amd64,linux/arm64,linux/s390x,linux/ppc64le"
+
+jobs:
+  build-and-push:
+    name: Build and push multi-arch testing image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve commit hash to embed
+        id: commit
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Determine whether to push
+        id: push
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Login to Kata Containers ghcr.io
+        if: ${{ steps.push.outputs.push == 'true' }}
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Kata Containers quay.io
+        if: ${{ steps.push.outputs.push == 'true' }}
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: quay.io
+          username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
+          password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
+
+      - name: Compute image tags
+        id: tags
+        env:
+          PUSH: ${{ steps.push.outputs.push }}
+          SHORT_SHA: ${{ steps.commit.outputs.short }}
+          FULL_SHA: ${{ steps.commit.outputs.commit }}
+        run: |
+          if [ "${PUSH}" != "true" ]; then
+            # PR build: tag the locally produced image but do not push it.
+            echo "args=--tag kata-monitor-ci:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          tag_args=""
+          for registry in ${REGISTRIES}; do
+            for tag in latest "${FULL_SHA}"; do
+              tag_args="${tag_args} --tag ${registry}:${tag}"
+            done
+          done
+          echo "args=${tag_args}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (and optionally push) kata-monitor testing image
+        env:
+          TAG_ARGS: ${{ steps.tags.outputs.args }}
+          GIT_COMMIT: ${{ steps.commit.outputs.commit }}
+          PUSH: ${{ steps.push.outputs.push }}
+        run: |
+          push_flag=""
+          if [ "${PUSH}" = "true" ]; then
+            push_flag="--push"
+          fi
+
+          # Disable provenance and SBOM so each tag is a single image manifest;
+          # quay.io rejects multi-arch manifest lists that include attestation
+          # manifests.
+          # shellcheck disable=SC2086
+          docker buildx build \
+            --platform "${PLATFORMS}" \
+            --provenance false --sbom false \
+            --build-arg "GIT_COMMIT=${GIT_COMMIT}" \
+            -f tools/packaging/kata-monitor/Dockerfile \
+            ${TAG_ARGS} \
+            ${push_flag} .

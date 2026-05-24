@@ -1,0 +1,101 @@
+name: Build and publish kata-monitor multi-arch image
+on:
+  workflow_call:
+    inputs:
+      registries:
+        description: "Space-separated list of registries to push to."
+        required: false
+        type: string
+        default: "quay.io/kata-containers/kata-monitor ghcr.io/kata-containers/kata-monitor"
+    secrets:
+      QUAY_DEPLOYER_PASSWORD:
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-kata-monitor-release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build-and-push:
+    name: Build and push kata-monitor multi-arch image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compute tags and commit hash
+        id: meta
+        run: |
+          # Replicates the convention used by the kata-deploy release
+          # workflows: when triggered from a tag we use that tag; when
+          # triggered from main we use the VERSION file and also tag the
+          # image as `latest`.
+          tag=$(echo "${GITHUB_REF}" | cut -d/ -f3-)
+          if [ "${tag}" = "main" ]; then
+            tag=$(./tools/packaging/release/release.sh release-version)
+            tags="${tag} latest"
+          else
+            tags="${tag}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Login to Kata Containers ghcr.io
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Kata Containers quay.io
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: quay.io
+          username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
+          password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
+
+      - name: Compute --tag arguments
+        id: image-tags
+        env:
+          REGISTRIES: ${{ inputs.registries }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          tag_args=""
+          for registry in ${REGISTRIES}; do
+            for tag in ${TAGS}; do
+              tag_args="${tag_args} --tag ${registry}:${tag}"
+            done
+          done
+          echo "args=${tag_args}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push kata-monitor multi-arch image
+        env:
+          TAG_ARGS: ${{ steps.image-tags.outputs.args }}
+          GIT_COMMIT: ${{ steps.meta.outputs.commit }}
+        run: |
+          # Disable provenance and SBOM so each tag is a single image
+          # manifest; quay.io rejects multi-arch manifest lists that
+          # include attestation manifests, matching the kata-deploy
+          # publishing flow.
+          # shellcheck disable=SC2086
+          docker buildx build \
+            --platform linux/amd64,linux/arm64,linux/s390x,linux/ppc64le \
+            --provenance false --sbom false \
+            --build-arg "GIT_COMMIT=${GIT_COMMIT}" \
+            -f tools/packaging/kata-monitor/Dockerfile \
+            ${TAG_ARGS} \
+            --push .
