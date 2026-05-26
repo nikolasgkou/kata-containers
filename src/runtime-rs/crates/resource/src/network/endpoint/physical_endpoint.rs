@@ -99,7 +99,7 @@ impl Endpoint for PhysicalEndpoint {
         self.hard_addr.clone()
     }
 
-    async fn attach(&self) -> Result<()> {
+    async fn attach(&self) -> Result<Option<String>> {
         // bind physical interface from host driver and bind to vfio
         driver::bind_device_to_vfio(
             &self.bdf,
@@ -121,7 +121,7 @@ impl Endpoint for PhysicalEndpoint {
             .await
             .context("do handle device failed.")?;
 
-        Ok(())
+        Ok(None)
     }
 
     // detach for physical endpoint unbinds the physical network interface from vfio-pci
