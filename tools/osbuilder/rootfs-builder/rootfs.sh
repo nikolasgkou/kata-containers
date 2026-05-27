@@ -97,10 +97,6 @@ readonly -a systemd_units=(
 	"systemd-random-seed"
 	"systemd-timesyncd"
 	"systemd-tmpfiles-setup"
-	"systemd-udevd"
-	"systemd-udevd-control"
-	"systemd-udevd-kernel"
-	"systemd-udev-trigger"
 	"systemd-update-utmp"
 )
 
@@ -791,6 +787,8 @@ EOF
 		ln -sf "/usr/lib/systemd/system/kata-containers.target" "${ROOTFS_DIR}/etc/systemd/system/basic.target.wants/kata-containers.target"
 		mkdir -p "${ROOTFS_DIR}/etc/systemd/system/kata-containers.target.wants"
 		ln -sf "/usr/lib/systemd/system/dbus.socket" "${ROOTFS_DIR}/etc/systemd/system/kata-containers.target.wants/dbus.socket"
+		ln -sf "/usr/lib/systemd/system/systemd-udevd.service" "${ROOTFS_DIR}/etc/systemd/system/kata-containers.target.wants/systemd-udevd.service"
+		ln -sf "/usr/lib/systemd/system/systemd-udev-trigger.service" "${ROOTFS_DIR}/etc/systemd/system/kata-containers.target.wants/systemd-udev-trigger.service"
 		chmod g+rx,o+x "${ROOTFS_DIR}"
 
 		if [[ "${CONFIDENTIAL_GUEST}" == "yes" ]]; then
